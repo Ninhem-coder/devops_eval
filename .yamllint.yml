@@ -1,0 +1,15 @@
+# Règles yamllint utilisées par la CI (job lint)
+extends: default
+
+ignore: |
+  node_modules/
+  reports/
+
+rules:
+  line-length:
+    max: 160
+  document-start: disable      # pas besoin de "---" en haut des fichiers
+  truthy:
+    check-keys: false          # sinon yamllint râle sur la clé "on:" de GitHub Actions
+  comments:
+    min-spaces-from-content: 1

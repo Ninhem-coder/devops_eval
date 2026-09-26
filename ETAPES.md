@@ -1,16 +1,16 @@
 # Étapes du projet
 
 Notes de suivi : ce qui a été fait à chaque étape, et les commandes pour le tester soi-même.
-Les commandes sont pour Linux / macOS (ou la VM Debian). Il faut Node 20 ou 22 et Docker.
+Les commandes sont pour Linux (la VM Debian). Il faut Node 20 ou 22 et Docker.
 
 Avancement :
 
 - [x] 1. Application (API + Postgres)
-- [x] 2. Tests automatisés
+- [x] 2. Test automatisé
 - [x] 3. Dockerfile
 - [x] 4. docker-compose
 - [x] 5. Action locale réutilisable
-- [ ] 6. CI (ci.yml)
+- [x] 6. CI (ci.yml)
 - [ ] 7. CD (cd.yml) + déploiement sur la VM
 - [ ] 8. Métriques /metrics + alertes
 - [ ] 9. README, zip, collaborateur
@@ -19,7 +19,7 @@ Avancement :
 
 ## Préparation (à faire une fois)
 
-Pour les étapes 1 à 3, on a juste besoin d'une base Postgres. On lance seulement le service `db` du docker-compose (étape 4) :
+Pour les étapes 1 à 3, on a juste besoin de la base Postgres. On lance seulement le service `db` du docker-compose :
 
 ```bash
 docker compose up -d db
@@ -30,7 +30,7 @@ La base est accessible sur `localhost:5432` (user `app`, mot de passe `app`, bas
 Puis on installe les dépendances du projet :
 
 ```bash
-npm install
+npm ci
 ```
 
 Pour tout arrêter à la fin : `docker compose down` (ajouter `-v` pour effacer aussi les données)
@@ -57,7 +57,7 @@ Routes :
 
 Pourquoi `/health` interroge la base : si l'API tourne mais que la base est morte, l'appli ne sert à rien. Un health qui répond toujours "ok" ne voudrait rien dire.
 
-Pourquoi app.js et server.js sont séparés : les tests importent `app.js` directement, sans avoir à lancer le serveur.
+Pourquoi app.js et server.js sont séparés : le test importe `app.js` directement, sans avoir à lancer le serveur.
 
 ### Tester
 
@@ -100,18 +100,19 @@ L'API ne doit pas planter pendant la coupure. Au début elle plantait : la libra
 
 ---
 
-## Étape 2 : les tests
+## Étape 2 : le test automatisé
 
-Fichier : `tests/api.test.js`. Outils : jest (lance les tests) et supertest (envoie des requêtes HTTP à l'app).
+Fichier : `tests/api.test.js`. Outils : jest (lance le test) et supertest (envoie des requêtes HTTP à l'app).
 
-Ce sont des tests d'intégration, ils utilisent une vraie base Postgres :
+Le sujet demande au moins un test qui vérifie un vrai comportement. Il y en a un, et il coche les 3 exemples donnés dans le sujet :
 
-1. GET /health renvoie 200 et `db: up`
-2. POST /notes renvoie 201, puis on vérifie directement dans Postgres que la note est bien enregistrée
-3. POST /notes avec un texte vide renvoie 400 et rien n'est écrit en base
-4. GET /notes renvoie les notes dans l'ordre
+| Ce que demande le sujet | Dans le test |
+|---|---|
+| code de retour HTTP | `expect(res.status).toBe(201)` |
+| contenu de réponse | `expect(res.body.text).toBe('acheter du pain')` |
+| interaction avec un service | `SELECT` direct dans Postgres pour vérifier que la note est bien enregistrée |
 
-Avant chaque test la table est vidée (`TRUNCATE`), pour que les tests ne dépendent pas les uns des autres.
+C'est un test d'intégration : il utilise une vraie base Postgres (en local celle du compose, en CI le `services: postgres`). La table est vidée au début (`TRUNCATE`) pour que le test donne toujours le même résultat.
 
 ### Tester
 
@@ -121,24 +122,31 @@ Postgres doit tourner (voir Préparation). Pas besoin de lancer l'API.
 npm test
 ```
 
-Résultat attendu : `Tests: 4 passed, 4 total` et un tableau de couverture.
+Résultat attendu : `Tests: 1 passed, 1 total` et un tableau de couverture.
 
 Les rapports sont générés dans `reports/` :
 
-- `reports/junit.xml` : résultat des tests au format JUnit
+- `reports/junit.xml` : résultat du test au format JUnit
 - `reports/coverage/` : couverture de code (ouvrir `reports/coverage/lcov-report/index.html` dans un navigateur)
 
-La CI les publiera en artifacts plus tard.
+La CI les publie en artifacts.
 
-### Prouver que les tests testent vraiment quelque chose
+### Prouver que le test teste vraiment quelque chose
 
 ```bash
 docker compose stop db
-npm test          # -> les 4 tests échouent
+npm test          # -> le test échoue
 docker compose start db
 ```
 
-Autre façon : dans `src/app.js`, remplacer `res.status(201)` par `res.status(200)` et relancer `npm test`. Le test du POST échoue. Remettre 201 après.
+Autre façon : casser le code et voir le test échouer.
+
+```bash
+sed -i 's/res.status(201)/res.status(200)/' src/app.js
+npm test          # -> échoue : Expected 201, Received 200
+sed -i 's/res.status(200).json(rows\[0\])/res.status(201).json(rows[0])/' src/app.js
+npm test          # -> repasse
+```
 
 ---
 
@@ -146,29 +154,23 @@ Autre façon : dans `src/app.js`, remplacer `res.status(201)` par `res.status(20
 
 Fichiers : `Dockerfile` et `.dockerignore`.
 
-Ce que demande le sujet et comment c'est fait :
-
-| Exigence | Dans le Dockerfile |
+| Exigence du sujet | Dans le Dockerfile |
 |---|---|
 | Image de base précise, pas latest | `node:22.20.0-alpine` (version exacte, variante alpine donc légère) |
 | Build multi-stage | stage `deps` qui fait le `npm ci`, puis stage `runtime` qui ne récupère que `node_modules` et le code |
 | Pas root | `USER 1000:1000`, c'est l'utilisateur `node` qui existe déjà dans l'image officielle |
 | HEALTHCHECK réel | appelle `/health`, qui interroge la base. Base coupée = conteneur unhealthy |
-| .dockerignore avec .git | exclut `.git`, `node_modules`, `tests`, `reports`, les `.md`, `.env`... |
+| .dockerignore avec .git | exclut `.git`, `node_modules`, `tests`, `reports`, `.env`... |
 
 Détails :
 
-- `npm ci --omit=dev` : on n'installe pas jest et supertest dans l'image de prod, ils ne servent qu'aux tests.
-- On copie `package.json` et `package-lock.json` avant le code : tant que les dépendances ne changent pas, Docker garde le `npm ci` en cache et le build est beaucoup plus rapide.
-- Le code appartient à root et l'appli tourne avec `node` : elle peut lire son code mais pas le modifier.
+- `npm ci --omit=dev` : on n'installe pas jest et supertest dans l'image, ils ne servent qu'aux tests.
+- On copie `package.json` et `package-lock.json` avant le code : tant que les dépendances ne changent pas, Docker garde le `npm ci` en cache et le build est plus rapide.
 - Le healthcheck utilise `node -e "fetch(...)"` au lieu de curl, comme ça pas besoin d'installer curl dans l'image.
-- `server.js` gère maintenant `SIGTERM` : quand on fait `docker stop`, l'appli ferme ses connexions et s'arrête tout de suite, au lieu d'attendre 10 s que Docker la tue.
-
-Le Dockerfile passe hadolint (linter de Dockerfile) sans aucun avertissement.
 
 ### Tester
 
-Postgres doit tourner (voir Préparation). On branche le conteneur de l'API sur le réseau du compose (`notes_default`) pour qu'il voie la base :
+La base doit tourner (voir Préparation). On branche le conteneur de l'API sur le réseau du compose (`notes_default`) pour qu'il voie la base :
 
 ```bash
 docker build -t notes-api:dev .
@@ -180,13 +182,12 @@ docker run -d --name notes-api --network notes_default -p 3000:3000 \
 curl http://localhost:3000/health
 ```
 
-Si le `docker build` dit que l'image `node:22.20.0-alpine` n'existe pas, prendre une autre version 22 en alpine sur hub.docker.com/_/node et changer la ligne `ARG NODE_IMAGE`.
+Si le `docker build` dit que l'image `node:22.20.0-alpine` n'existe pas, prendre une autre version 22 en alpine sur hub.docker.com/_/node et changer les deux lignes `FROM`.
 
 ### Prouver chaque point
 
 ```bash
-# pas root -> affiche node et 1000
-docker exec notes-api whoami
+# pas root -> affiche 1000
 docker exec notes-api id -u
 
 # le healthcheck marche -> healthy (attendre ~15 s après le lancement)
@@ -200,18 +201,11 @@ docker compose start db
 sleep 20
 docker inspect --format '{{.State.Health.Status}}' notes-api   # -> healthy
 
-# multi-stage + omit=dev : pas de jest dans l'image -> rien ne s'affiche
-docker exec notes-api ls node_modules | grep -E '^(jest|supertest)$'
-
 # .dockerignore : pas de .git ni de tests dans l'image
 docker exec notes-api ls -a /app
 
-# taille de l'image
+# multi-stage : taille de l'image
 docker images notes-api
-
-# arrêt propre -> "SIGTERM reçu, arrêt propre" dans les logs, et ça prend moins d'une seconde
-time docker stop notes-api
-docker logs notes-api
 ```
 
 Nettoyage : `docker rm -f notes-api`
@@ -227,9 +221,7 @@ Deux services :
 - `db` : Postgres 16 (version précise, alpine). Les données sont dans un volume `db-data` pour ne pas les perdre au redémarrage.
 - `app` : notre API, construite à partir du Dockerfile.
 
-Ce que demande le sujet :
-
-| Exigence | Dans le compose |
+| Exigence du sujet | Dans le compose |
 |---|---|
 | Deux services minimum | `db` et `app` |
 | Port de l'appli exposé et mappé | `3000:3000` (changeable avec `APP_PORT`) |
@@ -237,12 +229,11 @@ Ce que demande le sujet :
 
 Détails :
 
-- `depends_on` avec `condition: service_healthy` : l'API attend que Postgres soit vraiment prêt avant de démarrer, pas juste que le conteneur soit lancé. Les deux healthchecks sont donc liés : la base doit être healthy pour que l'API démarre, et l'API n'est healthy que si la base répond.
+- `depends_on` avec `condition: service_healthy` : l'API attend que Postgres soit vraiment prêt avant de démarrer. Les deux healthchecks sont liés : la base doit être healthy pour que l'API démarre, et l'API n'est healthy que si la base répond.
 - Dans le réseau du compose, chaque service est joignable par son nom : l'API se connecte à `DB_HOST=db`.
 - Le port de Postgres n'est ouvert que sur `127.0.0.1` : on peut lancer `npm test` depuis la machine, mais personne sur le réseau ne peut s'y connecter.
 - Les mots de passe ne sont pas en dur : `${DB_PASSWORD:-app}` prend la valeur du fichier `.env` s'il existe, sinon `app`. Le `.env` est dans le `.gitignore`, seul `.env.example` est commité.
-- `image: ${APP_IMAGE:-notes-api:local}` : en local l'image est construite, et au déploiement (étape 7) on pourra réutiliser le même fichier avec l'image de ghcr.io.
-- `restart: unless-stopped` : si l'appli plante ou si la machine redémarre, Docker la relance.
+- `image: ${APP_IMAGE:-notes-api:local}` : en local l'image est construite, et au déploiement (étape 7) on réutilise le même fichier avec l'image de ghcr.io.
 
 ### Tester
 
@@ -260,21 +251,11 @@ curl http://localhost:3000/health
 curl -X POST http://localhost:3000/notes \
   -H 'Content-Type: application/json' -d '{"text":"depuis compose"}'
 curl http://localhost:3000/notes
-docker compose logs app
 ```
 
 ### Prouver
 
 ```bash
-# l'ordre de démarrage : l'API attend que la base soit healthy
-docker compose down
-docker compose up -d
-docker compose ps        # app reste en "Created"/"Waiting" tant que db n'est pas healthy
-
-# les données survivent à un redémarrage (grâce au volume)
-docker compose restart
-curl http://localhost:3000/notes  # la note est toujours là
-
 # healthcheck cohérent : on coupe la base, l'API passe unhealthy
 docker compose stop db
 sleep 50
@@ -282,9 +263,6 @@ docker compose ps app    # -> unhealthy
 docker compose start db
 sleep 20
 docker compose ps        # -> tout redevient healthy
-
-# vérifier la syntaxe du fichier
-docker compose config -q && echo OK
 ```
 
 Arrêter : `docker compose down` (avec `-v` pour supprimer aussi les données).
@@ -295,22 +273,18 @@ Arrêter : `docker compose down` (avec `-v` pour supprimer aussi les données).
 
 Fichier : `.github/actions/setup-node-deps/action.yml`
 
-C'est une "composite action" : un petit bloc de steps qu'on écrit une fois et que les workflows appellent avec une seule ligne. Sans elle, chaque job de la CI (lint, test...) devrait répéter les mêmes 3 steps.
+C'est une "composite action" : un bloc de steps qu'on écrit une fois et que les jobs de la CI appellent avec une seule ligne, au lieu de le répéter dans chaque job.
 
-Les 3 steps :
+Les 2 steps :
 
-1. `actions/setup-node@v4` installe Node (version passée en paramètre, 22 par défaut) avec `cache: npm`, le cache natif de setup-node
-2. affiche dans les logs si le cache a été retrouvé ou non (`Cache npm : HIT` ou `MISS`)
-3. `npm ci` installe exactement les versions du `package-lock.json`
-
-Ce que demande le sujet (3.4) : une action locale d'au moins deux steps, appelée par les workflows sans dupliquer le bloc. C'est le cas, on en a trois.
+1. `actions/setup-node@v4` installe Node (version en paramètre, 22 par défaut) avec `cache: npm`, le cache natif de setup-node
+2. `npm ci` installe exactement les versions du `package-lock.json`
 
 Détails :
 
-- Le cache est rangé sous une clé calculée à partir du `package-lock.json`. Tant qu'il ne change pas, la clé est la même et le cache est réutilisé. Si on ajoute une dépendance, la clé change et le cache est refait.
-- Ce qui est mis en cache, c'est le dossier de téléchargement de npm (`~/.npm`), pas `node_modules`. `npm ci` supprime toujours `node_modules`, donc c'est plus fiable de cacher les téléchargements : npm ne retélécharge rien, il installe depuis le cache.
-- `npm ci` plutôt que `npm install` : il n'a pas le droit de modifier le `package-lock.json`, et il échoue si le lock n'est pas cohérent avec le `package.json`. En CI, on veut exactement les mêmes versions à chaque fois.
-- L'action a un paramètre `node-version`, ce qui permet de l'utiliser avec la matrix Node 20 / 22 dans le job de test.
+- La clé du cache est calculée à partir du `package-lock.json`. Tant qu'il ne change pas, le cache est réutilisé (HIT). Si on ajoute une dépendance, la clé change (MISS) et le cache est refait.
+- Ce qui est mis en cache, c'est le dossier de téléchargement de npm (`~/.npm`), pas `node_modules`, parce que `npm ci` supprime toujours `node_modules` avant d'installer.
+- Le paramètre `node-version` permet de l'utiliser avec la matrix Node 20 / 22.
 
 ### Utilisation dans un workflow
 
@@ -322,16 +296,96 @@ steps:
       node-version: 22
 ```
 
-### Tester / prouver
+---
 
-L'action ne se lance pas toute seule, elle sera testée avec la CI (étape 6). La preuve du cache HIT se fera là-bas :
+## Étape 6 : la CI
 
-- premier run de la CI : dans le log du step "Etat du cache npm" -> `Cache npm : MISS`
-- deuxième run sur la même branche (re-run ou nouveau push sans toucher au package-lock) -> `Cache npm : HIT`, et dans le step "Installer Node.js" une ligne `Cache restored from key: ...`
+Fichiers : `.github/workflows/ci.yml`, `.yamllint.yml`, `eslint.config.js` (et le script `npm run lint` dans `package.json`).
 
-Vérifier la syntaxe en local :
+Déclenchement : à chaque pull request et à chaque push sur `main`.
+
+```
+lint ─────┐
+          ├──> build ──> ci-ok
+test ─────┘
+ (Node 20 et 22)
+```
+
+| Job | Ce qu'il fait |
+|---|---|
+| `lint` | ESLint sur le code JS, yamllint sur tous les YAML |
+| `test` | matrix Node 20 / 22, avec un vrai Postgres en `services:`. Lance `npm test` et publie `reports/` (JUnit + coverage) en artifact |
+| `build` | attend lint et test, télécharge les rapports (download-artifact), construit l'image Docker |
+| `ci-ok` | job final, vert seulement si les 3 autres sont verts. C'est lui qu'on rend obligatoire pour merger sur main |
+
+| Exigence du sujet | Où |
+|---|---|
+| ci.yml sur pull_request et push main | bloc `on:` |
+| permissions explicites, moindre privilège | `permissions: contents: read` (la CI ne fait que lire le code) |
+| 4 jobs lint / test / build / ci-ok | les 4 jobs |
+| matrix 2 versions, un échec fait échouer le job | `strategy.matrix.node: [20, 22]` |
+| service utilisé vraiment | `services: postgres`, le test écrit et relit dans cette base |
+| cache des dépendances, HIT au 2e run | cache natif de setup-node dans l'action locale |
+| rapports publiés et récupérés par un job suivant | `upload-artifact` dans test, `download-artifact` dans build |
+| timeout-minutes sur chaque job | présent sur les 4 jobs |
+| lint des YAML | `yamllint --strict .` dans le job lint |
+
+Détails :
+
+- `if: always()` sur `ci-ok` : sans ça, si un job échoue, ci-ok serait "skipped" (gris) au lieu de rouge. Et GitHub considère un job skipped comme OK pour la protection de branche, donc le merge passerait.
+- `if: always()` sur l'upload des rapports : on veut le rapport surtout quand les tests échouent.
+- Le lint a trouvé une vraie erreur dans `app.js` (variable `err` inutilisée), corrigée.
+
+### Lancer les mêmes vérifications en local
 
 ```bash
-pip install yamllint     # ou : sudo apt-get install -y yamllint
-yamllint .github/actions/setup-node-deps/action.yml
+npm ci
+npm run lint                       # ESLint
+sudo apt-get install -y yamllint
+yamllint --strict .                # lint des YAML
+docker compose up -d db && npm test
+docker build -t notes-api:ci .
+```
+
+### Mettre en place sur GitHub
+
+1. Pousser :
+
+```bash
+git add .
+git commit -m "ci: ajout du pipeline lint, test, build et ci-ok"
+git push
+```
+
+2. Onglet **Actions** du dépôt : le workflow CI se lance, les 5 cases (lint, test Node 20, test Node 22, build, ci-ok) doivent passer au vert.
+
+3. Bloquer le merge si ci-ok est rouge : **Settings > Branches > Add classic branch protection rule**
+   - Branch name pattern : `main`
+   - cocher **Require a pull request before merging**
+   - cocher **Require status checks to pass before merging** et ajouter `ci-ok`
+   - enregistrer
+
+   Le check `ci-ok` n'apparaît dans la liste qu'après un premier run de la CI. À partir de là, on ne pousse plus directement sur main : on passe par une branche et une pull request.
+
+### Prouver
+
+**Cache HIT** : dans Actions, ouvrir le dernier run et cliquer sur "Re-run all jobs". Dans le nouveau run, job lint ou test, step "Installer Node.js" : ligne `Cache restored from key: ...`. Au tout premier run il y avait à la place `... cache is not found`.
+
+**Artifacts** : en bas de la page du run, section Artifacts : `test-reports-node-20` et `test-reports-node-22`. Dans le job build, step "Afficher les rapports récupérés", on voit les fichiers téléchargés.
+
+**Un test qui casse bloque le merge** :
+
+```bash
+git checkout -b test-casse
+sed -i 's/res.status(201)/res.status(200)/' src/app.js
+git commit -am "test: casser volontairement le code (à ne pas merger)"
+git push -u origin test-casse
+```
+
+Sur GitHub, ouvrir une pull request de `test-casse` vers `main` : le test échoue sur les 2 cases de la matrix, build est skipped, ci-ok est rouge et le bouton Merge est bloqué. Ensuite fermer la PR sans merger et supprimer la branche :
+
+```bash
+git checkout main
+git branch -D test-casse
+git push origin --delete test-casse
 ```

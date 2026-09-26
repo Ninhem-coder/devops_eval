@@ -1,8 +1,6 @@
-# Image de base précise (jamais latest) et alpine pour une image légère
-ARG NODE_IMAGE=node:22.20.0-alpine
-
 # ---------- Stage 1 : installation des dépendances ----------
-FROM ${NODE_IMAGE} AS deps
+# Image de base précise (jamais latest) et alpine pour une image légère
+FROM node:22.20.0-alpine AS deps
 WORKDIR /app
 # On copie d'abord uniquement package*.json : tant qu'ils ne changent pas,
 # Docker réutilise cette couche en cache et ne refait pas npm ci
@@ -11,7 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ---------- Stage 2 : image finale ----------
-FROM ${NODE_IMAGE} AS runtime
+FROM node:22.20.0-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000
 WORKDIR /app

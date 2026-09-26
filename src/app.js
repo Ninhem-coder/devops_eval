@@ -12,7 +12,7 @@ app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'ok', db: 'up' });
-  } catch (err) {
+  } catch {
     res.status(503).json({ status: 'error', db: 'down' });
   }
 });
@@ -37,6 +37,7 @@ app.post('/notes', async (req, res) => {
 });
 
 // Filet de sécurité : toute erreur non gérée -> 500 propre
+// Express reconnaît un gestionnaire d'erreur à ses 4 paramètres, donc "next" doit rester
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err.message);

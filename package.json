@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "jest --runInBand --coverage"
+    "test": "jest --runInBand --coverage",
+    "lint": "eslint ."
   },
   "author": "",
   "license": "ISC",
@@ -14,6 +15,9 @@
     "pg": "^8.23.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
     "jest": "^30.5.2",
     "jest-junit": "^17.0.0",
     "supertest": "^7.3.0"
@@ -23,8 +27,7 @@
     "coverageDirectory": "reports/coverage",
     "coverageReporters": [
       "text",
-      "lcov",
-      "cobertura"
+      "lcov"
     ],
     "reporters": [
       "default",

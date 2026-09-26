@@ -1,0 +1,125 @@
+# CI : à chaque pull request et à chaque push sur main.
+# lint + test (en parallèle) -> build -> ci-ok
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Moindre privilège : la CI a juste besoin de lire le code
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------
+  lint:
+    name: Lint (JS + YAML)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node + dépendances (action locale)
+        uses: ./.github/actions/setup-node-deps
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Lint des fichiers YAML
+        run: |
+          pip install --quiet yamllint
+          yamllint --strict .
+
+  # ---------------------------------------------------------------
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: [20, 22]
+
+    # Vrai Postgres lancé à côté du job, utilisé par le test
+    services:
+      postgres:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_USER: app
+      DB_PASSWORD: app
+      DB_NAME: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }} + dépendances (action locale)
+        uses: ./.github/actions/setup-node-deps
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Tests + couverture
+        run: npm test
+
+      - name: Publier les rapports (JUnit + coverage)
+        if: always()   # on publie aussi les rapports quand les tests échouent
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-node-${{ matrix.node }}
+          path: reports/
+
+  # ---------------------------------------------------------------
+  build:
+    name: Build de l'image Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Récupère les rapports publiés par le job test
+      - name: Télécharger les rapports de tests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-reports-*
+          path: downloaded-reports
+
+      - name: Afficher les rapports récupérés
+        run: ls -R downloaded-reports
+
+      - name: Build de l'image
+        run: docker build -t notes-api:ci .
+
+  # ---------------------------------------------------------------
+  # Job final : c'est lui qu'on met en "required" dans la protection de la branche main.
+  # Il est vert seulement si TOUS les jobs précédents sont verts.
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, test, build]
+    if: always()   # tourne même si un job a échoué, pour pouvoir se mettre en rouge
+    steps:
+      - name: Vérifier le résultat de tous les jobs
+        run: |
+          echo "lint  : ${{ needs.lint.result }}"
+          echo "test  : ${{ needs.test.result }}"
+          echo "build : ${{ needs.build.result }}"
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.test.result }}" != "success" ] || \
+             [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Au moins un job a échoué, merge bloqué"
+            exit 1
+          fi
