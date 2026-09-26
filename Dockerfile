@@ -20,6 +20,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
 
+# SHA du commit, donné par la CD au moment du build (--build-arg GIT_SHA=...)
+# et exposé par la jauge app_info de /metrics
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
+
 # L'utilisateur "node" (uid 1000) existe déjà dans l'image officielle : on ne tourne pas en root.
 # On met l'uid numérique pour que Docker/Kubernetes puissent vérifier que ce n'est pas root.
 USER 1000:1000
