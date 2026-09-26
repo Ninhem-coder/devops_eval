@@ -11,8 +11,8 @@ Avancement :
 - [x] 4. docker-compose
 - [x] 5. Action locale réutilisable
 - [x] 6. CI (ci.yml)
-- [ ] 7. CD (cd.yml) + déploiement sur la VM
-- [ ] 8. Métriques /metrics + alertes
+- [x] 7. CD (cd.yml) + déploiement sur la VM
+- [x] 8. Métriques /metrics + alertes
 - [ ] 9. README, zip, collaborateur
 
 ---
@@ -369,7 +369,13 @@ git push
 
 ### Prouver
 
-**Cache HIT** : dans Actions, ouvrir le dernier run et cliquer sur "Re-run all jobs". Dans le nouveau run, job lint ou test, step "Installer Node.js" : ligne `Cache restored from key: ...`. Au tout premier run il y avait à la place `... cache is not found`.
+**Cache HIT** : dans Actions, ouvrir le dernier run et cliquer sur "Re-run all jobs". Dans le nouveau run, job lint ou test, step "Installer Node.js" : lignes `Cache hit for: node-cache-...` et `Cache restored from key: ...`. Au tout premier run il y avait à la place `... cache is not found`.
+
+Preuve (2e run, job Tests Node 20) :
+
+![Cache HIT dans les logs de la CI](docs/preuves/ci-cache-hit.png)
+
+La clé du cache (`node-cache-Linux-x64-npm-5e01a8...`) se termine par le hash du `package-lock.json`. Tant qu'il ne change pas, c'est la même clé et le cache est retrouvé : environ 14 Mo de dépendances restaurés au lieu d'être retéléchargés.
 
 **Artifacts** : en bas de la page du run, section Artifacts : `test-reports-node-20` et `test-reports-node-22`. Dans le job build, step "Afficher les rapports récupérés", on voit les fichiers téléchargés.
 
@@ -389,3 +395,242 @@ git checkout main
 git branch -D test-casse
 git push origin --delete test-casse
 ```
+
+---
+
+## Étape 7 : la CD
+
+Fichiers : `.github/workflows/cd.yml` et `deploy/deploy.sh`.
+
+```
+CI verte sur main ──> build-push (runner GitHub) ──> deploy (self-hosted runner sur la VM)
+   ou lancement manuel     image poussée sur ghcr.io        pull + docker compose + healthcheck
+```
+
+### Les 2 jobs
+
+| Job | Où il tourne | Ce qu'il fait |
+|---|---|---|
+| `build-push` | runner GitHub (`ubuntu-latest`) | construit l'image et la pousse sur ghcr.io avec 3 tags |
+| `deploy` | la VM (`self-hosted`) | lance `deploy/deploy.sh` : pull de l'image, remplacement du conteneur, healthcheck, rollback si échec |
+
+### Ce que demande le sujet et où c'est
+
+| Exigence (3.1, 3.3, 3.5) | Où |
+|---|---|
+| cd.yml seulement sur push main, après une CI verte | `on: workflow_run` (quand le workflow CI se termine sur main) + `if: ...conclusion == 'success'` |
+| workflow_dispatch avec un input environment production | `on: workflow_dispatch` avec l'input `environment` (choix : production) |
+| permissions explicites, moindre privilège | `contents: read` (lire le code) et `packages: write` (pousser l'image), rien d'autre |
+| github registry | ghcr.io |
+| GITHUB_TOKEN | utilisé pour se connecter à ghcr.io (`secrets.GITHUB_TOKEN`), aucun autre secret |
+| tags latest, SHA court, semver | `latest`, `abc1234` (7 premiers caractères du commit), `v1.0.0` (version du `package.json`) |
+| deploy seulement si main ou workflow_dispatch | `if: github.ref == 'refs/heads/main' \|\| github.event_name == 'workflow_dispatch'` |
+| déploiement réel sur la machine cible | `runs-on: self-hosted`, le runner installé sur la VM |
+| curl sur le healthcheck avec 3 retries | fonction `healthcheck` de `deploy.sh` : 3 essais de `curl -f` sur `/health`, 10 s entre chaque |
+| si le healthcheck échoue, le job échoue | `deploy.sh` finit par `exit 1` |
+| rollback (re-pull du SHA précédent) | avant de déployer, le script note l'image qui tourne (`docker inspect`). En cas d'échec il la re-pull et relance le conteneur avec |
+| aucun secret dans les logs | le seul secret est `GITHUB_TOKEN`, passé à `docker/login-action` et masqué automatiquement par GitHub. Il n'est jamais affiché |
+
+Détails :
+
+- Pourquoi `workflow_run` : un simple `on: push` lancerait la CD en même temps que la CI, sans attendre son résultat. Avec `workflow_run`, la CD démarre quand la CI est finie, et `if: conclusion == 'success'` l'arrête si la CI est rouge.
+- On construit et déploie le commit exact validé par la CI (`workflow_run.head_sha`).
+- On déploie le tag SHA et pas `latest` : `latest` change à chaque push, alors qu'un SHA désigne toujours exactement la même image. C'est aussi ce qui rend le rollback possible.
+- ghcr.io exige un nom d'image en minuscules, d'où le `${GITHUB_REPOSITORY,,}` (le `,,` met en minuscules en bash).
+- Le déploiement réutilise le `docker-compose.yml` de l'étape 4 avec `APP_IMAGE=ghcr.io/...:sha` : pas de fichier en plus, et la base garde ses données (volume).
+- Stratégie : on remplace simplement le conteneur (il y a une seule VM). Le rollback demandé par le sujet, re-pull de l'image précédente, correspond à cette stratégie.
+- Si un problème apparaît après un déploiement réussi : `git revert` du commit en cause, puis merge. La CI et la CD repassent et redéploient la version corrigée.
+
+### Mise en place (une seule fois)
+
+**1. Installer le self-hosted runner sur la VM**
+
+Sur GitHub : **Settings > Actions > Runners > New self-hosted runner**, choisir **Linux** et **x64**. GitHub affiche des commandes : les copier une par une dans la VM, en tant que `nicolas` (pas root). Elles ressemblent à ça :
+
+```bash
+mkdir ~/actions-runner && cd ~/actions-runner
+curl -o actions-runner-linux-x64-X.Y.Z.tar.gz -L https://github.com/actions/runner/releases/download/...
+tar xzf ./actions-runner-linux-x64-X.Y.Z.tar.gz
+./config.sh --url https://github.com/PSEUDO/devops_eval --token XXXXXXXX
+```
+
+Pendant `config.sh`, appuyer sur Entrée à chaque question (valeurs par défaut).
+
+Puis l'installer comme service, pour qu'il tourne en permanence, même après un redémarrage de la VM :
+
+```bash
+sudo ./svc.sh install nicolas
+sudo ./svc.sh start
+sudo ./svc.sh status        # doit afficher "active (running)"
+```
+
+Sur GitHub, dans Settings > Actions > Runners, le runner doit apparaître **Idle** (vert).
+
+Le runner tourne avec l'utilisateur `nicolas`, qui est déjà dans le groupe `docker` (installation de l'étape 2), donc il peut lancer docker sans sudo.
+
+**2. Sécurité du runner** (dépôt public)
+
+Settings > Actions > General > "Fork pull request workflows from outside collaborators" : choisir **Require approval for all outside collaborators**. Sinon, n'importe qui pourrait ouvrir une PR depuis un fork et faire exécuter du code sur la VM.
+
+**3. Libérer le port 3000 sur la VM**
+
+Si l'appli tourne encore en local depuis les tests de l'étape 4, l'arrêter (le volume de données est gardé) :
+
+```bash
+cd ~/Downloads/devops-eval
+docker compose down
+```
+
+### Tester
+
+Pousser les fichiers par une branche et une PR (la protection de branche bloque le push direct sur main) :
+
+```bash
+git checkout -b feat/cd
+git add -A
+git commit -m "ci: ajout de la CD (build, push ghcr.io, deploy sur la VM)"
+git push -u origin feat/cd
+```
+
+Sur GitHub : ouvrir la PR, attendre ci-ok vert, merger. Ensuite :
+
+1. Onglet Actions : la CI tourne sur main, puis le workflow **CD** démarre tout seul.
+2. Job `build-push` vert : l'image est sur ghcr.io. Sur la page d'accueil du dépôt, colonne de droite, **Packages** : on y voit les 3 tags `latest`, le SHA court et `v1.0.0`.
+3. Job `deploy` vert : dans ses logs, `Healthcheck OK (essai 1/3)` et `Déploiement réussi`.
+4. Sur la VM :
+
+```bash
+docker ps                                # conteneur notes-app-1 avec l'image ghcr.io/...:<sha>
+curl http://localhost:3000/health        # {"status":"ok","db":"up"}
+```
+
+Lancement manuel : onglet Actions > CD > **Run workflow** > environment `production` > Run workflow.
+
+### Prouver le rollback
+
+On pousse volontairement une version dont le `/health` est cassé. Le test de la CI porte sur `POST /notes`, donc la CI reste verte et la CD déploie : c'est le healthcheck post-déploiement qui doit attraper le problème.
+
+```bash
+git checkout main && git pull
+git checkout -b test/rollback
+sed -i "s/res.json({ status: 'ok', db: 'up' });/res.status(500).json({ status: 'ok', db: 'up' });/" src/app.js
+git commit -am "test: casser /health pour tester le rollback"
+git push -u origin test/rollback
+```
+
+PR puis merge. Dans le job `deploy` de la CD :
+
+```
+Healthcheck en échec (essai 1/3)
+Healthcheck en échec (essai 2/3)
+Healthcheck en échec (essai 3/3)
+ÉCHEC du healthcheck après 3 essais
+ROLLBACK vers ghcr.io/.../devops_eval:<sha précédent>
+Healthcheck OK (essai 1/3)
+Rollback OK, l'ancienne version tourne de nouveau
+```
+
+et le job est **rouge**. Sur la VM, `docker ps` montre que c'est de nouveau l'image du SHA précédent qui tourne, et `curl localhost:3000/health` répond 200.
+
+Ensuite, remettre main propre avec un revert (c'est aussi la procédure de rollback manuel) :
+
+```bash
+git checkout main && git pull
+git checkout -b fix/revert-health
+git revert --no-edit HEAD
+git push -u origin fix/revert-health
+```
+
+Si git répond `is a merge but no -m option was given` (la PR a été mergée avec un commit de merge), utiliser `git revert --no-edit -m 1 HEAD` à la place.
+
+PR puis merge : la CD redéploie une version saine.
+
+---
+
+## Étape 8 : métriques et alertes
+
+Fichiers : `src/metrics.js`, `monitoring/alert_rules.yml`, et des petites modifs dans `src/app.js`, `Dockerfile` et `cd.yml`.
+
+### Les métriques (`GET /metrics`)
+
+La librairie `prom-client` génère le format texte de Prometheus. Un middleware placé en premier dans `app.js` chronomètre chaque requête et la compte quand la réponse part.
+
+| Exigence du sujet | Métrique |
+|---|---|
+| compteur de requêtes avec les labels endpoint et code | `http_requests_total{endpoint="/notes",code="201"}` |
+| histogramme de la durée, par route, pour calculer p95 / p99 | `http_request_duration_seconds{endpoint="/notes"}` (buckets de 5 ms à 5 s) |
+| jauge avec la version ou le SHA déployé | `app_info{version="1.0.0",sha="4be0cee"} 1` |
+
+Détails :
+
+- Le label `endpoint` prend la route déclarée (`/notes`), pas l'URL brute. Sinon chaque URL différente (`/notes/1`, `/notes/2`...) créerait une nouvelle série et Prometheus exploserait. Une URL qui ne correspond à aucune route est comptée en `unmatched`.
+- Les lectures de `/metrics` ne sont pas comptées, sinon Prometheus fausserait lui-même les chiffres à chaque scrape.
+- Le SHA vient de la CD : `build-args: GIT_SHA=...` dans `cd.yml`, puis `ARG` / `ENV GIT_SHA` dans le Dockerfile. En local il vaut `dev`.
+- En branchant les métriques, on a trouvé un bug : un JSON mal formé renvoyait 500 au lieu de 400, ce qui aurait déclenché l'alerte 5xx pour une erreur du client. Le gestionnaire d'erreurs de `app.js` garde maintenant le code 4xx des erreurs client.
+
+### Les alertes (`monitoring/alert_rules.yml`)
+
+**TauxErreurs5xxEleve**
+
+```
+sum(rate(http_requests_total{code=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+for: 5m
+```
+
+- ratio des 5xx sur toutes les requêtes, sur une fenêtre glissante de 5 minutes
+- seuil 5 % : normalement l'API ne renvoie quasiment jamais de 5xx (les erreurs du client sont des 4xx). 1 requête sur 20 en échec côté serveur, c'est un vrai problème. Plus bas, on alerterait pour une erreur isolée.
+- for 5m : évite d'alerter pour un pic très court, comme les quelques secondes de redémarrage du conteneur pendant un déploiement
+
+**LatenceP95Degradee**
+
+```
+histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m]))) > 0.5
+for: 10m
+```
+
+- p95 calculé à partir des buckets de l'histogramme, par route
+- seuil 500 ms : chaque route fait une requête SQL simple, le p95 normal est de quelques ms. 500 ms est une dégradation nette. C'est aussi une limite de bucket, donc le calcul est précis à cet endroit.
+- for 10m : plus long que pour les erreurs, parce qu'une lenteur passagère gêne moins qu'une erreur. On alerte seulement si elle dure.
+
+Une alerte passe par 3 états : inactive (condition fausse), pending (condition vraie depuis moins que `for`), firing (vraie depuis au moins `for`).
+
+### Tester les métriques
+
+```bash
+docker compose up -d --build
+curl http://localhost:3000/health
+curl -X POST http://localhost:3000/notes -H 'Content-Type: application/json' -d '{"text":"test"}'
+curl -X POST http://localhost:3000/notes -H 'Content-Type: application/json' -d '{}'
+curl http://localhost:3000/metrics
+```
+
+Dans la sortie on doit trouver :
+
+```
+http_requests_total{endpoint="/health",code="200"} 1
+http_requests_total{endpoint="/notes",code="201"} 1
+http_requests_total{endpoint="/notes",code="400"} 1
+http_request_duration_seconds_bucket{le="0.005",endpoint="/health"} 1
+...
+app_info{version="1.0.0",sha="dev"} 1
+```
+
+Sur la VM, après un déploiement par la CD, la jauge affiche le vrai SHA :
+
+```bash
+curl -s http://localhost:3000/metrics | grep app_info
+# app_info{version="1.0.0",sha="4be0cee"} 1   <- même SHA que le tag de l'image dans docker ps
+```
+
+### Vérifier les règles d'alerte
+
+`promtool` est l'outil officiel de Prometheus. Pas besoin de l'installer, on le lance depuis l'image officielle :
+
+```bash
+docker run --rm -v "$PWD/monitoring:/rules" --entrypoint promtool \
+  prom/prometheus:v3.5.0 check rules /rules/alert_rules.yml
+```
+
+Résultat attendu : `SUCCESS: 2 rules found`
+
+Note : `prom-client` a été ajouté dans `package.json`, donc le `package-lock.json` a changé. Au premier run de la CI après ce changement, la clé du cache change et on aura un cache MISS, puis HIT au run suivant. C'est normal, et ça montre que la clé suit bien les dépendances.

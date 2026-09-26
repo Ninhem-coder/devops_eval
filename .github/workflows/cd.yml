@@ -46,9 +46,11 @@ jobs:
           # ghcr.io exige un nom en minuscules
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           VERSION="$(node -p "require('./package.json').version")"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "sha_short=${SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=$IMAGE"
+            echo "sha_short=${SHA::7}"
+            echo "version=v$VERSION"
+          } >> "$GITHUB_OUTPUT"
           echo "Image : $IMAGE  tags : latest, ${SHA::7}, v$VERSION"
 
       - name: Connexion à ghcr.io
@@ -63,6 +65,8 @@ jobs:
         with:
           context: .
           push: true
+          # le SHA est affiché par la jauge app_info de /metrics
+          build-args: GIT_SHA=${{ steps.meta.outputs.sha_short }}
           tags: |
             ${{ steps.meta.outputs.image }}:latest
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_short }}

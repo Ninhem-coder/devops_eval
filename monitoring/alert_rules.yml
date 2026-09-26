@@ -1,0 +1,60 @@
+# Règles d'alerte Prometheus de l'API de notes.
+# Elles utilisent les métriques exposées par l'application sur /metrics.
+
+groups:
+  - name: notes-api
+    rules:
+      # ------------------------------------------------------------------
+      # Taux d'erreurs 5xx élevé
+      #
+      # Calcul : requêtes en 5xx / toutes les requêtes, sur les 5 dernières minutes
+      # (rate(...[5m]) = fenêtre glissante de 5 minutes).
+      #
+      # Seuil 5 % : en temps normal l'API ne renvoie quasiment jamais de 5xx
+      # (les erreurs du client sont des 4xx). 1 requête sur 20 qui échoue côté
+      # serveur, c'est un vrai problème (base injoignable, bug après un déploiement).
+      # En dessous, on risquerait d'alerter pour une erreur isolée.
+      #
+      # for: 5m : la condition doit rester vraie 5 minutes d'affilée. Ça évite
+      # d'alerter pour un pic très court (ex : les quelques secondes pendant
+      # lesquelles le conteneur redémarre au déploiement), tout en prévenant
+      # assez vite si le problème dure.
+      - alert: TauxErreurs5xxEleve
+        expr: |
+          sum(rate(http_requests_total{code=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Plus de 5 % des requêtes renvoient une erreur 5xx"
+          description: "Taux de 5xx sur 5 min : {{ $value | humanizePercentage }}"
+
+      # ------------------------------------------------------------------
+      # Latence dégradée (p95)
+      #
+      # Calcul : p95 de la durée des requêtes, par route, sur les 5 dernières
+      # minutes, à partir des buckets de l'histogramme http_request_duration_seconds.
+      # p95 = 95 % des requêtes sont plus rapides que cette valeur.
+      #
+      # Seuil 500 ms : chaque route fait une requête SQL simple sur une base
+      # locale, le p95 normal est de quelques millisecondes. 500 ms, c'est une
+      # dégradation nette et déjà ressentie par l'utilisateur. 0.5 est aussi une
+      # limite de bucket de l'histogramme, donc la valeur calculée est précise.
+      #
+      # for: 10m : plus long que pour les erreurs, car une lenteur passagère
+      # (démarrage à froid, pic de charge ponctuel) gêne moins qu'une erreur.
+      # On alerte seulement si la lenteur s'installe.
+      - alert: LatenceP95Degradee
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, endpoint) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latence p95 supérieure à 500 ms sur {{ $labels.endpoint }}"
+          description: "p95 sur 5 min : {{ $value | humanizeDuration }}"
