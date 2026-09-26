@@ -1,0 +1,50 @@
+# Action locale réutilisable : installe Node, restaure le cache npm et installe les dépendances.
+# Utilisée par les jobs de la CI au lieu de répéter ces étapes dans chaque job.
+#
+# Utilisation dans un workflow (après actions/checkout) :
+#   - uses: ./.github/actions/setup-node-deps
+#     with:
+#       node-version: 22
+
+name: Setup Node + dépendances
+description: Installe Node.js, restaure le cache npm et fait npm ci
+
+inputs:
+  node-version:
+    description: Version de Node.js à installer
+    required: false
+    default: "22"
+
+outputs:
+  cache-hit:
+    description: true si le cache npm a été retrouvé
+    value: ${{ steps.setup.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # 1. Installe Node + cache natif de setup-node.
+    #    La clé du cache est calculée à partir de package-lock.json :
+    #    tant qu'il ne change pas, le cache est réutilisé.
+    - name: Installer Node.js ${{ inputs.node-version }}
+      id: setup
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+        cache-dependency-path: package-lock.json
+
+    # 2. Affiche clairement dans les logs si le cache a été retrouvé (preuve du cache HIT)
+    - name: Etat du cache npm
+      shell: bash
+      run: |
+        if [ "${{ steps.setup.outputs.cache-hit }}" = "true" ]; then
+          echo "Cache npm : HIT (dépendances restaurées depuis le cache)"
+        else
+          echo "Cache npm : MISS (premier run ou package-lock.json modifié)"
+        fi
+
+    # 3. Installe exactement les versions du package-lock.json
+    - name: Installer les dépendances
+      shell: bash
+      run: npm ci

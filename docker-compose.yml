@@ -1,0 +1,53 @@
+# Lance l'API + sa base Postgres en une commande : docker compose up -d --build
+# Les valeurs ${VAR:-défaut} peuvent être changées dans un fichier .env (voir .env.example)
+
+name: notes   # nom du projet -> le réseau s'appelle toujours notes_default
+
+services:
+  db:
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+      POSTGRES_DB: ${DB_NAME:-app}
+    volumes:
+      - db-data:/var/lib/postgresql/data   # les données survivent à un redémarrage
+    ports:
+      # accessible seulement depuis la machine elle-même (pour lancer npm test), pas depuis le réseau
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      # pg_isready vérifie que Postgres accepte les connexions sur la bonne base
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    # en local : image construite à partir du Dockerfile
+    # en déploiement (CD) : APP_IMAGE pointe vers l'image poussée sur ghcr.io
+    image: ${APP_IMAGE:-notes-api:local}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy   # l'API ne démarre que quand la base est prête
+    environment:
+      PORT: 3000
+      DB_HOST: db                    # nom du service = nom d'hôte sur le réseau compose
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-app}
+      DB_PASSWORD: ${DB_PASSWORD:-app}
+      DB_NAME: ${DB_NAME:-app}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    healthcheck:
+      # même vérification que dans le Dockerfile : /health interroge la base
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  db-data:
