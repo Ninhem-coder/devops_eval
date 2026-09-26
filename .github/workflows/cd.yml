@@ -1,0 +1,97 @@
+# CD : après une CI verte sur main (ou lancement manuel),
+# construit l'image, la pousse sur GitHub Container Registry, puis la déploie sur la VM.
+name: CD
+
+on:
+  # se lance quand le workflow "CI" se termine sur main
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # lancement manuel depuis l'onglet Actions
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environnement cible
+        type: choice
+        options: [production]
+        default: production
+
+# Moindre privilège : lire le code et écrire dans le registry (packages)
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ---------------------------------------------------------------
+  build-push:
+    name: Build + push de l'image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # uniquement si la CI est verte (ou lancement manuel)
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      sha_short: ${{ steps.meta.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # le commit exact qui a été validé par la CI
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Calculer le nom et les tags de l'image
+        id: meta
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          # ghcr.io exige un nom en minuscules
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Image : $IMAGE  tags : latest, ${SHA::7}, v$VERSION"
+
+      - name: Connexion à ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push (3 tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_short }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+
+  # ---------------------------------------------------------------
+  deploy:
+    name: Déploiement sur la VM
+    needs: build-push
+    # le self-hosted runner installé sur la VM
+    runs-on: self-hosted
+    timeout-minutes: 10
+    # seulement depuis main, ou via lancement manuel
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    environment: ${{ inputs.environment || 'production' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Connexion à ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Déployer (healthcheck + rollback si échec)
+        env:
+          IMAGE: ${{ needs.build-push.outputs.image }}
+          TAG: ${{ needs.build-push.outputs.sha_short }}
+        run: ./deploy/deploy.sh
